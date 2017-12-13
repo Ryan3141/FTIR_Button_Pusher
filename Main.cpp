@@ -7,7 +7,7 @@
 #include <tchar.h>
 #include <algorithm>
 
-struct Command
+struct Command // A poorly structured type to contain all the information about a single command
 {
 	enum Operation { MOUSE, KEYBOARD, WINDOW_OPEN, HIT_ENTER, HIT_TAB, HIT_DOWN, HIT_LEFT, HIT_UP, HIT_RIGHT, HIT_CTRLF4 };
 	enum Press { NO_CLICK, LCLICK, RCLICK };
@@ -193,6 +193,9 @@ bool Build_Command( const std::string & just_command, const std::string & comman
 	return true;
 }
 
+// Simple file parser that takes all characters before the first whitespace of each line as a command,
+// and then the rest of the line (including whitespace) as the argument.  For example to type "Hello there!" on
+// keyboard, you simply have a line saying text Hello there!
 std::vector<Command> Load_Commands_File( const std::string & file_name )
 {
 	//FILE* file_ptr = _fsopen( file_name.c_str(), "r", _SH_DENYWR );
@@ -202,7 +205,6 @@ std::vector<Command> Load_Commands_File( const std::string & file_name )
 	//	file_ptr = _fsopen( file_name.c_str(), "r", _SH_DENYWR );
 	//}
 
-	//ifstream file( file_ptr );
 	ifstream file( file_name.c_str() );
 	if( !file.is_open() )
 		return std::vector<Command>();
@@ -231,7 +233,6 @@ std::vector<Command> Load_Commands_File( const std::string & file_name )
 		if( Build_Command( just_command, command_arguements, new_command ) )
 			commands_from_file.push_back( new_command );
 	}
-	//fclose( file_ptr );
 
 	return commands_from_file;
 }
@@ -323,7 +324,7 @@ void Run_Command( const Command & command )
 			}
 		}
 		break;
-		case Command::WINDOW_OPEN:
+		case Command::WINDOW_OPEN: // Waits for window to exist, blocking until it does, then gives it attention
 		{
 			HWND Find = FindWindow( NULL, command.keyboard_string.c_str() );
 			while( Find == NULL )
@@ -365,10 +366,10 @@ void Run_Command( const Command & command )
 			keybd_event( VK_RIGHT, 205, KEYEVENTF_KEYUP, 0 );
 		break;
 		case Command::HIT_CTRLF4:
-		keybd_event( VK_CONTROL, 0x1D, KEY_DOWN, 0 );
-		keybd_event( VK_F4, 0x3E, KEY_DOWN, 0 );
-		keybd_event( VK_F4, 0x3E, KEYEVENTF_KEYUP, 0 );
-		keybd_event( VK_CONTROL, 0x1D, KEYEVENTF_KEYUP, 0 );
+			keybd_event( VK_CONTROL, 0x1D, KEY_DOWN, 0 );
+				keybd_event( VK_F4, 0x3E, KEY_DOWN, 0 );
+				keybd_event( VK_F4, 0x3E, KEYEVENTF_KEYUP, 0 );
+			keybd_event( VK_CONTROL, 0x1D, KEYEVENTF_KEYUP, 0 );
 		break;
 	}
 
@@ -394,8 +395,12 @@ HWND OpenOmnicSoftware()
 	{
 		printf( "Omnic not found, reopen it if it is opened\n" );
 		TCHAR omnic_path[ 256 ];
+		TCHAR output_path[ 256 ];
 		GetPrivateProfileString( _T( "Folders" ), _T( "Omnic_Executable_Location" ), _T( "" ), omnic_path, 256, _T( ".\\config.ini" ) );
-		system( omnic_path );
+		GetPrivateProfileString( _T( "Folders" ), _T( "Write_Output_Folder" ), _T( "" ), output_path, 256, _T( ".\\config.ini" ) );
+		std::string change_directory_for_output( output_path );
+		change_directory_for_output = "cd " + change_directory_for_output + " && " + string( omnic_path );
+		system( change_directory_for_output.c_str() );
 	}
 	while( FindOmnic == NULL )
 	{
@@ -403,7 +408,7 @@ HWND OpenOmnicSoftware()
 		Sleep( 2000 );
 	}
 	ShowWindow( FindOmnic, SW_MAXIMIZE );
-	{ // Clear first window with Ctrl + F4 so future commands start with black slate
+	{ // Clear first window with Ctrl + F4 so future commands start with blank slate
 		DWORD KEY_DOWN = 0;
 		keybd_event( VK_CONTROL, 0x1D, KEY_DOWN, 0 );
 		keybd_event( VK_F4, 0x3E, KEY_DOWN, 0 );
