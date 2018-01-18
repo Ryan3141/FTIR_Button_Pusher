@@ -7,6 +7,8 @@
 #include <tchar.h>
 #include <algorithm>
 
+#include "CommunicationSocket.h"
+
 struct Command // A poorly structured type to contain all the information about a single command
 {
 	enum Operation { MOUSE, KEYBOARD, WINDOW_OPEN, HIT_ENTER, HIT_TAB, HIT_DOWN, HIT_LEFT, HIT_UP, HIT_RIGHT, HIT_CTRLF4 };
@@ -21,9 +23,11 @@ struct Command // A poorly structured type to contain all the information about 
 	std::string keyboard_string;
 };
 
-void DirectoryContentsChanged( LPTSTR watch_directory_path );
+void CommandDirectoryContentsChanged( LPTSTR watch_directory_path );
+void ResultDirectoryContentsChanged( LPTSTR watch_directory_path, TcpCommunicationSocket & communication_socket );
 void SubdirectoryChanged( LPTSTR watch_directory_root_path );
-void WatchDirectory( LPTSTR );
+bool UpdateWatchDirectory( LPTSTR watch_directory_path, const HANDLE dwChangeHandles[ 2 ] );
+void InitializeWatchDirectory( LPTSTR watch_directory_path, HANDLE dwChangeHandles[ 2 ] );
 
 using namespace std;
 
@@ -432,19 +436,40 @@ void main()
 	TCHAR write_folder[ 256 ];
 	GetPrivateProfileString( _T( "Folders" ), _T( "Write_Output_Folder" ), _T( "" ), write_folder, 256, _T( ".\\config.ini" ) );
 
-#ifndef RYAN_COMPUTER
-	HWND FindOmnic = OpenOmnicSoftware();
-#endif
+//#ifndef RYAN_COMPUTER
+//	HWND FindOmnic = OpenOmnicSoftware();
+//#endif
 	
-	DirectoryContentsChanged( read_folder );
-	WatchDirectory( read_folder );
+	CommandDirectoryContentsChanged( read_folder ); // Run any command files already in the folder
+	HANDLE Command_File_Change_Handles[ 2 ];
+	HANDLE Result_File_Change_Handles[ 2 ];
+	InitializeWatchDirectory( read_folder, Command_File_Change_Handles );
+	InitializeWatchDirectory( write_folder, Result_File_Change_Handles );
+
+	// Change notification is set. Now wait on both notification 
+	// handles and refresh accordingly. 
+	TcpCommunicationSocket communicator;
+	UdpListenerSocket listen_for_controller;
+	listen_for_controller.ListenOnPort( 6542, "Omnic Controller" );
+	//communicator.ConnectToHost( 6542, "127.0.0.1" );
+	while( true )
+	{
+		if( UpdateWatchDirectory( read_folder, Command_File_Change_Handles ) )
+			CommandDirectoryContentsChanged( read_folder );
+		if( UpdateWatchDirectory( write_folder, Result_File_Change_Handles ) )
+			ResultDirectoryContentsChanged( write_folder, communicator );
+		listen_for_controller.Update( communicator );
+		communicator.Update();
+		//communicator.SendFile( "Simple File.txt" );
+	}
+
+	WSACleanup(); //Clean up Winsock
 }
 
 // Code adapted from https://msdn.microsoft.com/en-us/library/windows/desktop/aa365261(v=vs.85).aspx
-void WatchDirectory( LPTSTR watch_directory_path )
+void InitializeWatchDirectory( LPTSTR watch_directory_path, HANDLE dwChangeHandles[ 2 ] )
 {
 	DWORD dwWaitStatus;
-	HANDLE dwChangeHandles[ 2 ];
 	TCHAR lpDrive[ 4 ];
 	TCHAR lpFile[ _MAX_FNAME ];
 	TCHAR lpExt[ _MAX_EXT ];
@@ -489,71 +514,116 @@ void WatchDirectory( LPTSTR watch_directory_path )
 		ExitProcess( GetLastError() );
 	}
 
-	// Change notification is set. Now wait on both notification 
-	// handles and refresh accordingly. 
-
-	while( TRUE )
-	{
-		// Wait for notification.
-
-		printf( ("Looking for commands in: " + string( watch_directory_path ) + "\n" ).c_str() );
-
-		dwWaitStatus = WaitForMultipleObjects( 2, dwChangeHandles,
-											   FALSE, INFINITE );
-
-		switch( dwWaitStatus )
-		{
-			case WAIT_OBJECT_0:
-
-			// A file was created, renamed, or deleted in the directory.
-			// Refresh this directory and restart the notification.
-
-			DirectoryContentsChanged( watch_directory_path );
-			if( FindNextChangeNotification( dwChangeHandles[ 0 ] ) == FALSE )
-			{
-				printf( "\n ERROR: FindNextChangeNotification function failed.\n" );
-				ExitProcess( GetLastError() );
-			}
-			break;
-
-			case WAIT_OBJECT_0 + 1:
-
-			// A directory was created, renamed, or deleted.
-			// Refresh the tree and restart the notification.
-
-			SubdirectoryChanged( watch_directory_path );
-			if( FindNextChangeNotification( dwChangeHandles[ 1 ] ) == FALSE )
-			{
-				printf( "\n ERROR: FindNextChangeNotification function failed.\n" );
-				ExitProcess( GetLastError() );
-			}
-			break;
-
-			case WAIT_TIMEOUT:
-
-			// A timeout occurred, this would happen if some value other 
-			// than INFINITE is used in the Wait call and no changes occur.
-			// In a single-threaded environment you might not want an
-			// INFINITE wait.
-
-			printf( "\nNo changes in the timeout period.\n" );
-			break;
-
-			default:
-			printf( "\n ERROR: Unhandled dwWaitStatus.\n" );
-			ExitProcess( GetLastError() );
-			break;
-		}
-	}
+	printf( ("Watching Folder: " + string( watch_directory_path ) + "\n").c_str() );
 }
 
-void DirectoryContentsChanged( LPTSTR watch_directory_path )
+bool UpdateWatchDirectory( LPTSTR watch_directory_path, const HANDLE dwChangeHandles[ 2 ] )
+{
+	// Wait for notification.
+	DWORD dwWaitStatus = WaitForMultipleObjects( 2, dwChangeHandles,
+											FALSE, 500 );
+
+	switch( dwWaitStatus )
+	{
+		case WAIT_OBJECT_0:
+
+		// A file was created, renamed, or deleted in the directory.
+		// Refresh this directory and restart the notification.
+
+		if( FindNextChangeNotification( dwChangeHandles[ 0 ] ) == FALSE )
+		{
+			printf( "\n ERROR: FindNextChangeNotification function failed.\n" );
+			ExitProcess( GetLastError() );
+		}
+		return true;
+		break;
+
+		case WAIT_OBJECT_0 + 1:
+
+		// A directory was created, renamed, or deleted.
+		// Refresh the tree and restart the notification.
+
+		SubdirectoryChanged( watch_directory_path );
+		if( FindNextChangeNotification( dwChangeHandles[ 1 ] ) == FALSE )
+		{
+			printf( "\n ERROR: FindNextChangeNotification function failed.\n" );
+			ExitProcess( GetLastError() );
+		}
+		break;
+
+		case WAIT_TIMEOUT:
+
+		// A timeout occurred, this would happen if some value other 
+		// than INFINITE is used in the Wait call and no changes occur.
+		// In a single-threaded environment you might not want an
+		// INFINITE wait.
+
+		//printf( "\nNo changes in the timeout period.\n" );
+		break;
+
+		default:
+		printf( "\n ERROR: Unhandled dwWaitStatus.\n" );
+		ExitProcess( GetLastError() );
+		break;
+	}
+	return false;
+}
+
+void ResultDirectoryContentsChanged( LPTSTR watch_directory_path, TcpCommunicationSocket & communication_socket )
+{
+	string full_directory_path = watch_directory_path;
+
+	if( full_directory_path.size() > (MAX_PATH - 3) )
+	{
+		_tprintf( TEXT( "\nDirectory path is too long.\n" ) );
+		return;
+	}
+
+	//_tprintf( TEXT( "Target directory is %s\n" ), watch_directory_path );
+
+	// Prepare string for use with FindFile functions.  First, copy the
+	// string to a buffer, then append '\*' to the directory name.
+
+	string path_with_wildcard = full_directory_path + "\\*.csv";
+
+	// Find the first file in the directory.
+	WIN32_FIND_DATA ffd;
+	HANDLE hFind = FindFirstFile( path_with_wildcard.c_str(), &ffd );
+
+	if( INVALID_HANDLE_VALUE == hFind )
+	{
+		return;
+	}
+
+	// List all the files in the directory with some info about them.
+
+	do
+	{
+		if( ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY )
+		{
+			_tprintf( TEXT( "  %s   <DIR>\n" ), ffd.cFileName );
+		}
+		else
+		{
+			LARGE_INTEGER filesize;
+			filesize.LowPart = ffd.nFileSizeLow;
+			filesize.HighPart = ffd.nFileSizeHigh;
+			_tprintf( TEXT( "  %s   %ld bytes\n" ), ffd.cFileName, filesize.QuadPart );
+
+			Sleep( 3000 );
+			communication_socket.SendFile( watch_directory_path + string( "\\" ) + ffd.cFileName );
+			DeleteFile( (watch_directory_path + string( "\\" ) + ffd.cFileName).c_str() );
+		}
+	} while( FindNextFile( hFind, &ffd ) != 0 );
+}
+
+void CommandDirectoryContentsChanged( LPTSTR watch_directory_path )
 {
 	// This is where you might place code to refresh your
 	// directory listing, but not the subtree because it
 	// would not be necessary.
 
-	printf( TEXT( "Directory (%s) changed.\n" ), watch_directory_path );
+	//printf( TEXT( "Directory (%s) changed.\n" ), watch_directory_path );
 	// Find the first file in the directory.
 
 	// Check that the input path plus 3 is not longer than MAX_PATH.
@@ -614,3 +684,4 @@ void SubdirectoryChanged( LPTSTR watch_directory_root_path )
 
 	printf( TEXT( "Directory tree (%s) changed.\n" ), watch_directory_root_path );
 }
+

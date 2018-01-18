@@ -7,6 +7,6 @@ all: test.exe
 .c.obj:  
   $(cc) $(cdebug) $(cflags) $(cvars) $*.c  
   
-test.exe: main.obj  
-  LINK $(ldebug) $(conflags) /out:test.exe main.obj $(conlibs) lsapi32.lib user32.lib 
+test.exe: main.obj CommunicationSocket.obj 
+  LINK $(ldebug) $(conflags) /out:test.exe main.obj CommunicationSocket.obj $(conlibs) lsapi32.lib user32.lib 
  
