@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <fstream>
 #include <vector>
+#include <algorithm>
 
 ////Return the IP address of a domain name
 //
@@ -26,6 +27,10 @@
 #pragma comment (lib, "Mswsock.lib")
 #pragma comment (lib, "AdvApi32.lib")
 
+
+std::vector<Command> Make_Commands_From_Vector( const std::vector<std::string> & split_into_lines );
+bool Build_Command( const std::string & just_command, const std::string & command_arguements, Command & new_command );
+std::vector<Command> Parse_Partial_Incoming_Message( std::string & partial_message );
 
 using namespace std;
 
@@ -138,14 +143,27 @@ bool TcpCommunicationSocket::ConnectToHost( int port_number, char* IPAddress )
 	{
 		printf( "Successfully connected to %s:%d\n", IPAddress, port_number );
 		this->socket_connected = true;
+		this->peer_ip_address = IPAddress;
+		this->peer_port = port_number;
+
 		return true; //Success
 	}
 }
 
-void TcpCommunicationSocket::Update()
+std::string TcpCommunicationSocket::Get_Peer_IP() const
+{
+	return this->peer_ip_address;
+}
+
+int TcpCommunicationSocket::Get_Peer_Port() const
+{
+	return this->peer_port;
+}
+
+vector<Command> TcpCommunicationSocket::Update()
 {
 	if( !socket_connected )
-		return;
+		return vector<Command>();
 
 	u_long nonblocking = 1;
 	int iResult = ioctlsocket( s, FIONBIO, &nonblocking );
@@ -172,30 +190,105 @@ void TcpCommunicationSocket::Update()
 		if( error == WSAEWOULDBLOCK )
 		{
 			//printf( "Non blocking\n" );
-			return;
+			return vector<Command>();
+		}
+		else if( error == WSAECONNRESET )
+		{
+			this->socket_connected = false;
+			printf( "Disconnected from %s:%d\n", this->Get_Peer_IP().c_str(), this->Get_Peer_Port() );
+			return vector<Command>();
 		}
 		else
+
 		{
 			printf( "recvfrom() failed with error code : %d\n", WSAGetLastError() );
 			//exit( EXIT_FAILURE );
 		}
 	}
 
+	if( recv_len == -1 )
+		return vector<Command>();
+
 	string data = buf;
 
 	if( data == "PING\n" )
-		return;
+		return vector<Command>();
 
 	//print details of the client/peer and the data received
-	printf( "Received packet from %s:%d\n", inet_ntoa( si_other.sin_addr ), ntohs( si_other.sin_port ) );
-	printf( "Data: %s\n", buf );
+	printf( "Received packet from %s:%d\n", this->Get_Peer_IP().c_str(), this->Get_Peer_Port() );
+	//printf( "Data: %s\n", buf );
 
-	//now reply the client with the same data
-	if( sendto( s, buf, recv_len, 0, (struct sockaddr*) &si_other, slen ) == SOCKET_ERROR )
+	partial_message.insert( partial_message.end(), buf, buf + recv_len );
+
+	return Parse_Partial_Incoming_Message( this->partial_message );
+
+	////now reply the client with the same data
+	//if( sendto( s, buf, recv_len, 0, (struct sockaddr*) &si_other, slen ) == SOCKET_ERROR )
+	//{
+	//	printf( "sendto() failed with error code : %d\n", WSAGetLastError() );
+	//	//exit( EXIT_FAILURE );
+	//}
+}
+
+// This big horrible mess just reads the possibly incomplete input, splits them into commands,
+// and if it is a file, it puts the lines back together to check if the full file is there yet
+static vector<Command> Parse_Partial_Incoming_Message( std::string & partial_message)
+{
+	vector<string> split_by_line = split( partial_message, '\n' );
+	vector<Command> output_list;
+
+	int original_number_of_lines = split_by_line.size();
+	for( int i = 0; i < original_number_of_lines - 1; i++ )
 	{
-		printf( "sendto() failed with error code : %d\n", WSAGetLastError() );
-		//exit( EXIT_FAILURE );
+		string & current_line = split_by_line[ i ];
+
+		size_t first_nonwhitespace = current_line.find_first_not_of( " \t\n" );
+		if( first_nonwhitespace == std::string::npos )
+			continue;
+		string ltrimmed = current_line.substr( first_nonwhitespace );
+
+		size_t end_of_command = ltrimmed.find_first_of( " \t\n" );
+		if( end_of_command == std::string::npos )
+			end_of_command = ltrimmed.size();
+
+		string just_command = ltrimmed.substr( 0, end_of_command );
+
+		string lowercase_command( just_command );
+		std::transform( just_command.begin(), just_command.end(), lowercase_command.begin(), ::tolower );
+		string command_arguements;
+		if( end_of_command < ltrimmed.size() )
+			command_arguements = ltrimmed.substr( end_of_command + 1 );
+
+		if( lowercase_command == "file" )
+		{
+			unsigned int length_of_file = atoi( command_arguements.c_str() );
+			unsigned int length_of_header = current_line.size() + 1;
+
+			partial_message = join( split_by_line.begin() + i, split_by_line.end(), std::string( "\n" ) );
+
+			if( partial_message.size() >= length_of_header + length_of_file )
+			{
+				vector<string> split_by_line = split( partial_message.substr( length_of_header, length_of_file ), '\n' );
+				partial_message = partial_message.substr( length_of_header + length_of_file );
+				vector<Command> add_this = Make_Commands_From_Vector( split_by_line );
+				output_list.insert( output_list.end(), add_this.begin(), add_this.end() );
+
+				// Since we screwup up the order, manually fix it
+				int new_number_of_lines = split( partial_message, '\n' ).size();
+				i += original_number_of_lines - new_number_of_lines - 1;
+			}
+			else
+				break; // We don't want to use any of the data until everything is here
+		}
+		else
+		{
+			Command new_command;
+			if( Build_Command( just_command, command_arguements, new_command ) )
+				output_list.push_back( new_command );
+		}
 	}
+
+	return output_list;
 }
 
 void TcpCommunicationSocket::SendFile( std::string path_to_file )
@@ -204,15 +297,23 @@ void TcpCommunicationSocket::SendFile( std::string path_to_file )
 		return;
 
 	printf( "Sending file: %s\n", path_to_file.c_str() );
-	ifstream file( path_to_file, ios::binary );
+	ifstream file( path_to_file.c_str(), ios::binary );
 	if( path_to_file.empty() )
 		return;
 
 	//std::copy( std::istreambuf_iterator<char>( file ),
 	//		   std::istreambuf_iterator<char>(),
 	//		   this->partial_message.message.begin() );
-	vector<char> test_out( (std::istreambuf_iterator<char>( file )),
-						  ( std::istreambuf_iterator<char>()) );
+	string test_out;
+	while( !file.eof() )
+	{
+		string current_line;
+		std::getline( file, current_line );
+		test_out += current_line;
+	}
+
+	//string test_out( (std::istreambuf_iterator<char>( file )),
+	//					  ( std::istreambuf_iterator<char>()) );
 
 	struct sockaddr_in si_other;
 	int slen = sizeof( si_other );
@@ -329,14 +430,14 @@ void UdpListenerSocket::Update( TcpCommunicationSocket & connect_on_message_avai
 		}
 	}
 
-	//print details of the client/peer and the data received
-	char* peer_ip_address = inet_ntoa( si_other.sin_addr );
-	int peer_port = ntohs( si_other.sin_port );
-	printf( "Received packet from %s:%d\n", peer_ip_address, peer_port );
-	printf( "Data: %s\n", buf );
-
-	if( buf == this->id_string )
+	if( !connect_on_message_available.socket_connected && buf == this->id_string )
 	{
+		//print details of the client/peer and the data received
+		char* peer_ip_address = inet_ntoa( si_other.sin_addr );
+		int peer_port = ntohs( si_other.sin_port );
+		printf( "Received packet from %s:%d\n", peer_ip_address, peer_port );
+		printf( "Data: %s\n", buf );
+
 		connect_on_message_available.CloseConnection(); // Remove any previous connection
 		connect_on_message_available.ConnectToHost( this->listen_port, peer_ip_address ); // Make new connection
 	}

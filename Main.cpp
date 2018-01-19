@@ -9,25 +9,12 @@
 
 #include "CommunicationSocket.h"
 
-struct Command // A poorly structured type to contain all the information about a single command
-{
-	enum Operation { MOUSE, KEYBOARD, WINDOW_OPEN, HIT_ENTER, HIT_TAB, HIT_DOWN, HIT_LEFT, HIT_UP, HIT_RIGHT, HIT_CTRLF4 };
-	enum Press { NO_CLICK, LCLICK, RCLICK };
-	enum Hold_Key { HOLD_NONE, HOLD_CTRL, HOLD_ALT, HOLD_SHIFT };
-	Press mouse_button;
-	Hold_Key held_key;
-	Operation operation;
-	int mouse_x;
-	int mouse_y;
-
-	std::string keyboard_string;
-};
-
 void CommandDirectoryContentsChanged( LPTSTR watch_directory_path );
 void ResultDirectoryContentsChanged( LPTSTR watch_directory_path, TcpCommunicationSocket & communication_socket );
 void SubdirectoryChanged( LPTSTR watch_directory_root_path );
 bool UpdateWatchDirectory( LPTSTR watch_directory_path, const HANDLE dwChangeHandles[ 2 ] );
 void InitializeWatchDirectory( LPTSTR watch_directory_path, HANDLE dwChangeHandles[ 2 ] );
+std::vector<Command> Make_Commands_From_Vector( const std::vector<std::string> & split_into_lines );
 
 using namespace std;
 
@@ -214,11 +201,25 @@ std::vector<Command> Load_Commands_File( const std::string & file_name )
 		return std::vector<Command>();
 
 	std::vector<Command> commands_from_file;
+	vector<string> split_into_lines;
+
 	while( !file.eof() )
 	{
 		string current_line;
 		std::getline( file, current_line );
+		split_into_lines.push_back( current_line );
+	}
 
+	return Make_Commands_From_Vector( split_into_lines );
+}
+
+vector<Command> Make_Commands_From_Vector( const vector<string> & split_into_lines )
+{
+	vector<Command> commands;
+
+	for( int i = 0; i < split_into_lines.size(); i++ )
+	{
+		const string & current_line = split_into_lines[ i ];
 		size_t first_nonwhitespace = current_line.find_first_not_of( " \t\n" );
 		if( first_nonwhitespace == std::string::npos )
 			continue;
@@ -235,10 +236,10 @@ std::vector<Command> Load_Commands_File( const std::string & file_name )
 
 		Command new_command;
 		if( Build_Command( just_command, command_arguements, new_command ) )
-			commands_from_file.push_back( new_command );
+			commands.push_back( new_command );
 	}
 
-	return commands_from_file;
+	return commands;
 }
 
 void Run_Command( const Command & command )
@@ -436,9 +437,9 @@ void main()
 	TCHAR write_folder[ 256 ];
 	GetPrivateProfileString( _T( "Folders" ), _T( "Write_Output_Folder" ), _T( "" ), write_folder, 256, _T( ".\\config.ini" ) );
 
-//#ifndef RYAN_COMPUTER
-//	HWND FindOmnic = OpenOmnicSoftware();
-//#endif
+#ifndef RYAN_COMPUTER
+	HWND FindOmnic = OpenOmnicSoftware();
+#endif
 	
 	CommandDirectoryContentsChanged( read_folder ); // Run any command files already in the folder
 	HANDLE Command_File_Change_Handles[ 2 ];
@@ -459,7 +460,10 @@ void main()
 		if( UpdateWatchDirectory( write_folder, Result_File_Change_Handles ) )
 			ResultDirectoryContentsChanged( write_folder, communicator );
 		listen_for_controller.Update( communicator );
-		communicator.Update();
+		vector<Command> commands = communicator.Update();
+		for( int command_i = 0; command_i < commands.size(); command_i++ )
+			Run_Command( commands[ command_i ] );
+
 		//communicator.SendFile( "Simple File.txt" );
 	}
 
