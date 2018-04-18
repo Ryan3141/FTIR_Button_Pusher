@@ -162,7 +162,7 @@ int TcpCommunicationSocket::Get_Peer_Port() const
 
 vector<Command> TcpCommunicationSocket::Update()
 {
-	if( !socket_connected )
+	if( !this->socket_connected )
 		return vector<Command>();
 
 	u_long nonblocking = 1;
@@ -170,20 +170,36 @@ vector<Command> TcpCommunicationSocket::Update()
 	if( iResult != NO_ERROR )
 		printf( "ioctlsocket failed with error: %ld\n", iResult );
 
-	const int BUFLEN = 512;  //Max length of buffer
-	char buf[ BUFLEN ];
-	int recv_len;
 	struct sockaddr_in si_other;
 	int slen = sizeof( si_other );
 	//printf( "Waiting for data..." );
 	//fflush( stdout );
 
+
+	string ping_message = "Ping\n";
+	if( sendto( s, ping_message.c_str(), ping_message.size(), 0, (struct sockaddr*) &si_other, slen ) == SOCKET_ERROR )
+	{
+		int error = WSAGetLastError();
+		if( error == WSAEWOULDBLOCK )
+		{
+			////printf( "Non blocking\n" );
+			//return vector<Command>();
+		}
+		else
+		{
+			this->socket_connected = false;
+			printf( "Disconnected from %s:%d\n", this->Get_Peer_IP().c_str(), this->Get_Peer_Port() );
+			printf( "recvfrom() failed with error code : %d\n", WSAGetLastError() );
+			return vector<Command>();
+		}
+	}
+
 	//clear the buffer by filling null, it might have previously received data
+	const int BUFLEN = 512;  //Max length of buffer
+	char buf[ BUFLEN ];
 	memset( buf, '\0', BUFLEN );
-
-	int iSendResult = send( s, "Sup bra\n", 8, 0 );
-
 	//try to receive some data, this is a blocking call
+	int recv_len;
 	if( (recv_len = recvfrom( s, buf, BUFLEN, 0, (struct sockaddr *) &si_other, &slen )) == SOCKET_ERROR )
 	{
 		int error = WSAGetLastError();
@@ -201,7 +217,10 @@ vector<Command> TcpCommunicationSocket::Update()
 		else
 
 		{
+			this->socket_connected = false;
+			printf( "Disconnected from %s:%d\n", this->Get_Peer_IP().c_str(), this->Get_Peer_Port() );
 			printf( "recvfrom() failed with error code : %d\n", WSAGetLastError() );
+			return vector<Command>();
 			//exit( EXIT_FAILURE );
 		}
 	}
@@ -291,25 +310,48 @@ static vector<Command> Parse_Partial_Incoming_Message( std::string & partial_mes
 	return output_list;
 }
 
-void TcpCommunicationSocket::SendFile( std::string path_to_file )
+void TcpCommunicationSocket::SendMessage( std::string message )
 {
 	if( !this->socket_connected )
 		return;
 
-	printf( "Sending file: %s\n", path_to_file.c_str() );
-	ifstream file( path_to_file.c_str(), ios::binary );
-	if( path_to_file.empty() )
+	struct sockaddr_in si_other;
+	int slen = sizeof( si_other );
+
+	u_long nonblocking = 1;
+	int iResult = ioctlsocket( s, FIONBIO, &nonblocking );
+	if( iResult != NO_ERROR )
+		printf( "ioctlsocket failed with error: %ld\n", iResult );
+
+	if( sendto( s, &(message[ 0 ]), message.size(), 0, (struct sockaddr*) &si_other, slen ) == SOCKET_ERROR )
+	{
+		printf( "File sending sendto() failed with error code : %d\n", WSAGetLastError() );
+		//exit( EXIT_FAILURE );
+	}
+}
+void TcpCommunicationSocket::SendFile( std::string path_to_file, std::string file_name )
+{
+	if( !this->socket_connected )
 		return;
 
-	//std::copy( std::istreambuf_iterator<char>( file ),
-	//		   std::istreambuf_iterator<char>(),
-	//		   this->partial_message.message.begin() );
-	string test_out;
-	while( !file.eof() )
+	if( path_to_file.empty() || file_name.empty() )
+		return;
+	printf( "Sending file: %s\n", file_name.c_str() );
+
+	vector<char> file_data;
 	{
-		string current_line;
-		std::getline( file, current_line );
-		test_out += current_line;
+		ifstream file( (path_to_file + "\\" + file_name).c_str(), ios::binary | ios::ate); // ios::ate opens file with pointer at end of file
+		if( !file.is_open() )
+			return;
+		//std::copy( std::istreambuf_iterator<char>( file ),
+		//		   std::istreambuf_iterator<char>(),
+		//		   this->partial_message.message.begin() );
+
+		streampos size = file.tellg();
+		file_data.resize( size );
+		file.seekg( 0, ios::beg );
+		file.read( &file_data[ 0 ], size );
+		file.close();
 	}
 
 	//string test_out( (std::istreambuf_iterator<char>( file )),
@@ -319,14 +361,20 @@ void TcpCommunicationSocket::SendFile( std::string path_to_file )
 	int slen = sizeof( si_other );
 	//if( sendto( s, &this->partial_message.message[ 0 ], this->partial_message.message.size(), 0, (struct sockaddr*) &si_other, slen ) == SOCKET_ERROR )
 	char size_as_string[ 64 ];
-	_itoa_s( test_out.size(), size_as_string, 64, 10 );
-	string header_info = "FILE " + string( size_as_string ) + "\n";
+	_itoa_s( file_data.size(), size_as_string, 64, 10 );
+
+	u_long nonblocking = 1;
+	int iResult = ioctlsocket( s, FIONBIO, &nonblocking );
+	if( iResult != NO_ERROR )
+		printf( "ioctlsocket failed with error: %ld\n", iResult );
+
+	string header_info = "FILE \"" + file_name + "\" " + string( size_as_string ) + "\n";
 	if( sendto( s, header_info.c_str(), header_info.size(), 0, (struct sockaddr*) &si_other, slen ) == SOCKET_ERROR )
 	{
 		printf( "File sending header sendto() failed with error code : %d\n", WSAGetLastError() );
 		//exit( EXIT_FAILURE );
 	}
-	if( sendto( s, &(test_out[ 0 ]), test_out.size(), 0, (struct sockaddr*) &si_other, slen ) == SOCKET_ERROR )
+	if( sendto( s, &(file_data[ 0 ]), file_data.size(), 0, (struct sockaddr*) &si_other, slen ) == SOCKET_ERROR )
 	{
 		printf( "File sending sendto() failed with error code : %d\n", WSAGetLastError() );
 		//exit( EXIT_FAILURE );

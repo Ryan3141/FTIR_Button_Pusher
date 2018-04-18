@@ -9,8 +9,8 @@
 
 #include "CommunicationSocket.h"
 
-void CommandDirectoryContentsChanged( LPTSTR watch_directory_path );
-void ResultDirectoryContentsChanged( LPTSTR watch_directory_path, TcpCommunicationSocket & communication_socket );
+//void CommandDirectoryContentsChanged( LPTSTR watch_directory_path );
+void ResultDirectoryContentsChanged( std::string watch_directory_path, std::string search_for, TcpCommunicationSocket & communication_socket );
 void SubdirectoryChanged( LPTSTR watch_directory_root_path );
 bool UpdateWatchDirectory( LPTSTR watch_directory_path, const HANDLE dwChangeHandles[ 2 ] );
 void InitializeWatchDirectory( LPTSTR watch_directory_path, HANDLE dwChangeHandles[ 2 ] );
@@ -178,6 +178,11 @@ bool Build_Command( const std::string & just_command, const std::string & comman
 	{
 		new_command.operation = Command::HIT_CTRLF4;
 	}
+	else if( lowercase_command == "sendclipboard" )
+	{
+		new_command.operation = Command::SEND_CLIPBOARD;
+		new_command.keyboard_string = command_arguements;
+	}
 	else
 		return false;
 
@@ -242,7 +247,7 @@ vector<Command> Make_Commands_From_Vector( const vector<string> & split_into_lin
 	return commands;
 }
 
-void Run_Command( const Command & command )
+void Run_Command( const Command & command, TcpCommunicationSocket & communication_socket )
 {
 	static bool initialized = false;
 	static char ascii_to_scancode[ 256 ];
@@ -376,6 +381,23 @@ void Run_Command( const Command & command )
 				keybd_event( VK_F4, 0x3E, KEYEVENTF_KEYUP, 0 );
 			keybd_event( VK_CONTROL, 0x1D, KEYEVENTF_KEYUP, 0 );
 		break;
+		case Command::SEND_CLIPBOARD:
+		{
+			if( OpenClipboard( NULL ) )
+			{
+				HANDLE h = GetClipboardData( CF_TEXT );
+
+				printf( "%d\n", (int)h );
+				std::string clipboard_text = (char *)h;
+
+				printf( "%s %s\n", command.keyboard_string.c_str(), clipboard_text.c_str() );
+
+				CloseClipboard();
+
+				//communication_socket.SendMessage( command.keyboard_string + " " + clipboard_text );
+			}
+		}
+		break;
 	}
 
 	switch( command.held_key )
@@ -441,10 +463,10 @@ void main()
 	HWND FindOmnic = OpenOmnicSoftware();
 #endif
 	
-	CommandDirectoryContentsChanged( read_folder ); // Run any command files already in the folder
+	//CommandDirectoryContentsChanged( read_folder ); // Run any command files already in the folder
 	HANDLE Command_File_Change_Handles[ 2 ];
 	HANDLE Result_File_Change_Handles[ 2 ];
-	InitializeWatchDirectory( read_folder, Command_File_Change_Handles );
+	//InitializeWatchDirectory( read_folder, Command_File_Change_Handles );
 	InitializeWatchDirectory( write_folder, Result_File_Change_Handles );
 
 	// Change notification is set. Now wait on both notification 
@@ -453,16 +475,22 @@ void main()
 	UdpListenerSocket listen_for_controller;
 	listen_for_controller.ListenOnPort( 6542, "Omnic Controller" );
 	//communicator.ConnectToHost( 6542, "127.0.0.1" );
+	//Command test;
+	//test.operation = Command::SEND_CLIPBOARD;
+	//Run_Command( test, communicator );
 	while( true )
 	{
-		if( UpdateWatchDirectory( read_folder, Command_File_Change_Handles ) )
-			CommandDirectoryContentsChanged( read_folder );
+		//if( UpdateWatchDirectory( read_folder, Command_File_Change_Handles ) )
+		//	CommandDirectoryContentsChanged( read_folder );
 		if( UpdateWatchDirectory( write_folder, Result_File_Change_Handles ) )
-			ResultDirectoryContentsChanged( write_folder, communicator );
+		{
+			ResultDirectoryContentsChanged( write_folder, "*.csv", communicator );
+			ResultDirectoryContentsChanged( write_folder, "*.exp", communicator );
+		}
 		listen_for_controller.Update( communicator );
 		vector<Command> commands = communicator.Update();
 		for( int command_i = 0; command_i < commands.size(); command_i++ )
-			Run_Command( commands[ command_i ] );
+			Run_Command( commands[ command_i ], communicator );
 
 		//communicator.SendFile( "Simple File.txt" );
 	}
@@ -573,11 +601,9 @@ bool UpdateWatchDirectory( LPTSTR watch_directory_path, const HANDLE dwChangeHan
 	return false;
 }
 
-void ResultDirectoryContentsChanged( LPTSTR watch_directory_path, TcpCommunicationSocket & communication_socket )
+void ResultDirectoryContentsChanged( std::string watch_directory_path, std::string search_for, TcpCommunicationSocket & communication_socket )
 {
-	string full_directory_path = watch_directory_path;
-
-	if( full_directory_path.size() > (MAX_PATH - 3) )
+	if( watch_directory_path.size() > (MAX_PATH - 3) )
 	{
 		_tprintf( TEXT( "\nDirectory path is too long.\n" ) );
 		return;
@@ -587,99 +613,106 @@ void ResultDirectoryContentsChanged( LPTSTR watch_directory_path, TcpCommunicati
 
 	// Prepare string for use with FindFile functions.  First, copy the
 	// string to a buffer, then append '\*' to the directory name.
-
-	string path_with_wildcard = full_directory_path + "\\*.csv";
-
-	// Find the first file in the directory.
-	WIN32_FIND_DATA ffd;
-	HANDLE hFind = FindFirstFile( path_with_wildcard.c_str(), &ffd );
-
-	if( INVALID_HANDLE_VALUE == hFind )
+	vector<string> delete_after;
 	{
-		return;
+		string path_with_wildcard = watch_directory_path + "\\" + search_for;
+		// Find the first file in the directory.
+		WIN32_FIND_DATA ffd;
+		HANDLE hFind = FindFirstFile( path_with_wildcard.c_str(), &ffd );
+
+		if( INVALID_HANDLE_VALUE == hFind )
+		{
+			return;
+		}
+
+		do
+		{
+			printf( "Loop\n" );
+			if( ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY )
+			{
+				_tprintf( TEXT( "  %s   <DIR>\n" ), ffd.cFileName );
+			}
+			else
+			{
+				LARGE_INTEGER filesize;
+				filesize.LowPart = ffd.nFileSizeLow;
+				filesize.HighPart = ffd.nFileSizeHigh;
+				_tprintf( TEXT( "  %s   %ld bytes\n" ), ffd.cFileName, filesize.QuadPart );
+
+				Sleep( 3000 );
+				communication_socket.SendFile( watch_directory_path, ffd.cFileName );
+				delete_after.push_back( watch_directory_path + string( "\\" ) + ffd.cFileName );
+			}
+		} while( FindNextFile( hFind, &ffd ) != 0 );
 	}
 
-	// List all the files in the directory with some info about them.
-
-	do
+	for( int i = 0; i < delete_after.size(); i++ )
 	{
-		if( ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY )
-		{
-			_tprintf( TEXT( "  %s   <DIR>\n" ), ffd.cFileName );
-		}
-		else
-		{
-			LARGE_INTEGER filesize;
-			filesize.LowPart = ffd.nFileSizeLow;
-			filesize.HighPart = ffd.nFileSizeHigh;
-			_tprintf( TEXT( "  %s   %ld bytes\n" ), ffd.cFileName, filesize.QuadPart );
-
-			Sleep( 3000 );
-			communication_socket.SendFile( watch_directory_path + string( "\\" ) + ffd.cFileName );
-			DeleteFile( (watch_directory_path + string( "\\" ) + ffd.cFileName).c_str() );
-		}
-	} while( FindNextFile( hFind, &ffd ) != 0 );
+		printf( "Deleting local copy of %s\n", delete_after[ i ].c_str() );
+		DeleteFile( delete_after[ i ].c_str() );
+	}
+	printf( "Finished\n" );
 }
 
-void CommandDirectoryContentsChanged( LPTSTR watch_directory_path )
-{
-	// This is where you might place code to refresh your
-	// directory listing, but not the subtree because it
-	// would not be necessary.
-
-	//printf( TEXT( "Directory (%s) changed.\n" ), watch_directory_path );
-	// Find the first file in the directory.
-
-	// Check that the input path plus 3 is not longer than MAX_PATH.
-	// Three characters are for the "\*" plus NULL appended below.
-
-	string full_directory_path = watch_directory_path;
-
-	if( full_directory_path.size() > (MAX_PATH - 3) )
-	{
-		_tprintf( TEXT( "\nDirectory path is too long.\n" ) );
-		return;
-	}
-
-	_tprintf( TEXT( "\nTarget directory is %s\n\n" ), watch_directory_path );
-
-	// Prepare string for use with FindFile functions.  First, copy the
-	// string to a buffer, then append '\*' to the directory name.
-
-	string path_with_wildcard = full_directory_path + "\\*.command";
-
-	// Find the first file in the directory.
-	WIN32_FIND_DATA ffd;
-	HANDLE hFind = FindFirstFile( path_with_wildcard.c_str(), &ffd );
-
-	if( INVALID_HANDLE_VALUE == hFind )
-	{
-		return;
-	}
-
-	// List all the files in the directory with some info about them.
-
-	do
-	{
-		if( ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY )
-		{
-			_tprintf( TEXT( "  %s   <DIR>\n" ), ffd.cFileName );
-		}
-		else
-		{
-			LARGE_INTEGER filesize;
-			filesize.LowPart = ffd.nFileSizeLow;
-			filesize.HighPart = ffd.nFileSizeHigh;
-			_tprintf( TEXT( "  %s   %ld bytes\n" ), ffd.cFileName, filesize.QuadPart );
-
-			Sleep( 3000 );
-			std::vector<Command> commands = Load_Commands_File( (watch_directory_path + string( "\\" ) + ffd.cFileName).c_str() );
-			for( int command_i = 0; command_i < commands.size(); command_i++ )
-				Run_Command( commands[ command_i ] );
-			DeleteFile( (watch_directory_path + string( "\\" ) + ffd.cFileName).c_str() );
-		}
-	} while( FindNextFile( hFind, &ffd ) != 0 );
-}
+//void CommandDirectoryContentsChanged( LPTSTR watch_directory_path )
+//{
+//	// This is where you might place code to refresh your
+//	// directory listing, but not the subtree because it
+//	// would not be necessary.
+//
+//	//printf( TEXT( "Directory (%s) changed.\n" ), watch_directory_path );
+//	// Find the first file in the directory.
+//
+//	// Check that the input path plus 3 is not longer than MAX_PATH.
+//	// Three characters are for the "\*" plus NULL appended below.
+//
+//	string full_directory_path = watch_directory_path;
+//
+//	if( full_directory_path.size() > (MAX_PATH - 3) )
+//	{
+//		_tprintf( TEXT( "\nDirectory path is too long.\n" ) );
+//		return;
+//	}
+//
+//	_tprintf( TEXT( "\nTarget directory is %s\n\n" ), watch_directory_path );
+//
+//	// Prepare string for use with FindFile functions.  First, copy the
+//	// string to a buffer, then append '\*' to the directory name.
+//
+//	string path_with_wildcard = full_directory_path + "\\*.command";
+//
+//	// Find the first file in the directory.
+//	WIN32_FIND_DATA ffd;
+//	HANDLE hFind = FindFirstFile( path_with_wildcard.c_str(), &ffd );
+//
+//	if( INVALID_HANDLE_VALUE == hFind )
+//	{
+//		return;
+//	}
+//
+//	// List all the files in the directory with some info about them.
+//
+//	do
+//	{
+//		if( ffd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY )
+//		{
+//			_tprintf( TEXT( "  %s   <DIR>\n" ), ffd.cFileName );
+//		}
+//		else
+//		{
+//			LARGE_INTEGER filesize;
+//			filesize.LowPart = ffd.nFileSizeLow;
+//			filesize.HighPart = ffd.nFileSizeHigh;
+//			_tprintf( TEXT( "  %s   %ld bytes\n" ), ffd.cFileName, filesize.QuadPart );
+//
+//			Sleep( 3000 );
+//			std::vector<Command> commands = Load_Commands_File( (watch_directory_path + string( "\\" ) + ffd.cFileName).c_str() );
+//			for( int command_i = 0; command_i < commands.size(); command_i++ )
+//				Run_Command( commands[ command_i ] );
+//			DeleteFile( (watch_directory_path + string( "\\" ) + ffd.cFileName).c_str() );
+//		}
+//	} while( FindNextFile( hFind, &ffd ) != 0 );
+//}
 
 void SubdirectoryChanged( LPTSTR watch_directory_root_path )
 {

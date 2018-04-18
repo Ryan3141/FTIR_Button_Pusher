@@ -15,7 +15,7 @@
 
 struct Command // A poorly structured type to contain all the information about a single command
 {
-	enum Operation { MOUSE, KEYBOARD, WINDOW_OPEN, HIT_ENTER, HIT_TAB, HIT_DOWN, HIT_LEFT, HIT_UP, HIT_RIGHT, HIT_CTRLF4 };
+	enum Operation { MOUSE, KEYBOARD, WINDOW_OPEN, HIT_ENTER, HIT_TAB, HIT_DOWN, HIT_LEFT, HIT_UP, HIT_RIGHT, HIT_CTRLF4, SEND_CLIPBOARD };
 	enum Press { NO_CLICK, LCLICK, RCLICK };
 	enum Hold_Key { HOLD_NONE, HOLD_CTRL, HOLD_ALT, HOLD_SHIFT };
 	Press mouse_button;
@@ -38,7 +38,8 @@ public:
 	int ListenOnPort( int port_number );
 	std::vector<Command> Update();
 	void CloseConnection();
-	void SendFile( std::string path_to_file );
+	void SendFile( std::string path_to_file, std::string file_name );
+	void SendMessage( std::string message );
 	std::string Get_Peer_IP() const;
 	int Get_Peer_Port() const;
 	bool socket_connected;
